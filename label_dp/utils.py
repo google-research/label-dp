@@ -130,6 +130,12 @@ def get_dtype(half_precision: bool, platform: Optional[str] = None):
     return jnp.float32
 
 
+def split_state_params(variables):
+  """Separate (BatchNorm) states and trainable params."""
+  params = variables.pop('params')
+  return variables, params
+
+
 def initialize_model(rng, input_shape, model):
   """Initializes parameters and states for a model."""
   input_shape = (1, *input_shape)  # add a dummy batch dimension
@@ -137,7 +143,7 @@ def initialize_model(rng, input_shape, model):
   def init(*args):
     return model.init(*args)
   variables = init({'params': rng}, jnp.ones(input_shape, model.dtype))
-  model_states, params = variables.pop('params')
+  model_states, params = split_state_params(variables)
   return params, model_states
 
 
@@ -193,13 +199,11 @@ def optimizer_step(loss_fn, state):
     # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
     # params should be restored (= skip this step).
     new_state = new_state.replace(
-        opt_state=jax.tree_multimap(
-            functools.partial(jnp.where, is_fin),
-            new_state.opt_state,
+        opt_state=jax.tree_map(
+            functools.partial(jnp.where, is_fin), new_state.opt_state,
             state.opt_state),
-        params=jax.tree_multimap(
-            functools.partial(jnp.where, is_fin),
-            new_state.params,
+        params=jax.tree_map(
+            functools.partial(jnp.where, is_fin), new_state.params,
             state.params))
     metrics['scale'] = dynamic_scale.scale
 
@@ -251,6 +255,6 @@ def sync_batch_stats(state):
   # we average them.
   avg = jax.pmap(lambda x: jax.lax.pmean(x, 'x'), 'x')
 
-  new_model_states = state.model_states.copy({
-      'batch_stats': avg(state.model_states['batch_stats'])})
+  new_model_states = state.model_states | {
+      'batch_stats': avg(state.model_states['batch_stats'])}
   return state.replace(model_states=new_model_states)
